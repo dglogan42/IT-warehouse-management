@@ -6,23 +6,48 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = Path(__file__).resolve().parent
 TABLES = ('products', 'shipments', 'invoices', 'movements')
 DB_PATH = ROOT / 'warehouse.db'
+STATIC = {
+    '/': ('index.html', 'text/html; charset=utf-8'),
+    '/index.html': ('index.html', 'text/html; charset=utf-8'),
+    '/schema.sql': ('schema.sql', 'text/plain; charset=utf-8'),
+    '/sql/ba.sql': ('sql/ba.sql', 'text/plain; charset=utf-8'),
+    '/excel/WarehouseExcel.bas': ('excel/WarehouseExcel.bas', 'text/plain; charset=utf-8'),
+}
 def connect():
     c = sqlite3.connect(DB_PATH, timeout=15)
     c.row_factory = sqlite3.Row
     c.execute('PRAGMA foreign_keys=ON')
     return c
+def ba_queries():
+    parts=[]; buf=[]
+    for line in (ROOT/'sql'/'ba.sql').read_text().splitlines():
+        if line.strip()=='-- @@':
+            parts.append('\n'.join(buf).strip()); buf=[]
+        elif not line.startswith('--'):
+            buf.append(line)
+    tail='\n'.join(buf).strip()
+    if tail: parts.append(tail)
+    parts=[part.strip().rstrip(';').strip() for part in parts]
+    if len(parts)!=2 or not all(parts): raise RuntimeError('sql/ba.sql must contain two statements')
+    return parts
+VALUED_SQL, CLEANED_SQL = ba_queries()
 def initialise():
     with connect() as c:
         if not c.execute("SELECT 1 FROM sqlite_master WHERE name='products'").fetchone():
             c.executescript((ROOT / 'schema.sql').read_text())
+        cols={row['name'] for row in c.execute('PRAGMA table_info(products)')}
+        if 'unit_cost' not in cols:
+            c.execute('ALTER TABLE products ADD COLUMN unit_cost real NOT NULL DEFAULT 0 CHECK(unit_cost >= 0)')
+        if 'markup_percent' not in cols:
+            c.execute('ALTER TABLE products ADD COLUMN markup_percent real NOT NULL DEFAULT 0')
 def text(b, k, required=True):
     v = str(b.get(k) or '').strip()
     if len(v)>200 or (required and not v): raise ValueError('Enter a valid '+k.replace('_',' '))
     return v
 def numeric(b,k,integer=False,minimum=0):
     try: v=float(b[k])
-    except (KeyError,ValueError,TypeError): raise ValueError('Invalid '+k)
-    if not math.isfinite(v) or v<minimum or (integer and not v.is_integer()): raise ValueError('Invalid '+k)
+    except (KeyError,ValueError,TypeError): raise ValueError('Invalid '+k.replace('_',' '))
+    if not math.isfinite(v) or (minimum is not None and v<minimum) or (integer and not v.is_integer()): raise ValueError('Invalid '+k.replace('_',' '))
     return int(v) if integer else v
 def choice(b,k,allowed):
     v=text(b,k)
@@ -36,8 +61,8 @@ def save(entity,b):
     identifier=str(uuid.uuid4())
     with connect() as c:
         if entity=='products':
-            columns=['sku','name','category','unit','location','minimum','quantity']
-            values=[text(b,k) for k in columns[:5]]+[numeric(b,'minimum',True),0]
+            columns=['sku','name','category','unit','location','minimum','quantity','unit_cost','markup_percent']
+            values=[text(b,k) for k in columns[:5]]+[numeric(b,'minimum',True),0,numeric(b,'unit_cost'),numeric(b,'markup_percent',minimum=None)]
         elif entity=='shipments':
             optional=['bl','customs_do','bacc','packing_list','origin_certificate','treatment_certificate','declaration','importer_code','carrier','consignment','destination','destination_country','customs_client_code','export_entry','export_certificate','market_access_reference']
             columns=['container','supplier','eta','direction','size','container_type','status','delivery_status']+optional
@@ -76,10 +101,13 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with connect() as c:
                     data={t:[dict(r) for r in c.execute('SELECT * FROM '+t+' ORDER BY '+('created DESC' if t=='movements' else 'rowid DESC'))] for t in TABLES}
+                    data['valued']=[dict(r) for r in c.execute(VALUED_SQL)]
+                    data['cleaned']=[dict(r) for r in c.execute(CLEANED_SQL)]
                 self.respond(data)
             except sqlite3.Error: self.respond({'error':'Database unavailable'},503)
-        elif path in ('/','/index.html','/schema.sql'):
-            self.respond((ROOT/('schema.sql' if path=='/schema.sql' else 'index.html')).read_bytes(),content='text/plain' if path=='/schema.sql' else 'text/html; charset=utf-8')
+        elif path in STATIC:
+            name, content = STATIC[path]
+            self.respond((ROOT/name).read_bytes(), content=content)
         else: self.respond({'error':'Not found'},404)
     def do_POST(self):
         origin=self.headers.get('Origin')

@@ -38,8 +38,11 @@ CREATE TABLE `products` (
 	`location` text NOT NULL,
 	`minimum` integer DEFAULT 0 NOT NULL,
 	`quantity` integer DEFAULT 0 NOT NULL,
+	`unit_cost` real DEFAULT 0 NOT NULL,
+	`markup_percent` real DEFAULT 0 NOT NULL,
 	CONSTRAINT "positive_stock" CHECK("products"."quantity" >= 0),
-	CONSTRAINT "positive_minimum" CHECK("products"."minimum" >= 0)
+	CONSTRAINT "positive_minimum" CHECK("products"."minimum" >= 0),
+	CONSTRAINT "nonnegative_unit_cost" CHECK("products"."unit_cost" >= 0)
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `products_sku_unique` ON `products` (`sku`);--> statement-breakpoint
